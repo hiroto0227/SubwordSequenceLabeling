@@ -82,8 +82,8 @@ def train(data):
             #### loss_function ###
             forward_out, backward_out = output.split(output.shape[2] // 2, dim=2)
             embed_tensor = get_embedding_tensor_from_id_tensor(batch_word, dataset.pretrain_word_embedding)
-            loss += criterion(forward_out, torch.cat([embed_tensor[:, 1:], torch.zeros(batch_size, 1, embed_tensor.shape[2])], dim=1))
-            loss += criterion(backward_out, torch.cat([torch.zeros(batch_size, 1, embed_tensor.shape[2]), embed_tensor[:, :-1]], dim=1))
+            loss += criterion(forward_out, torch.cat([embed_tensor[:, 1:], torch.zeros(embed_tensor.shape[0], 1, embed_tensor.shape[2])], dim=1))
+            loss += criterion(backward_out, torch.cat([torch.zeros(embed_tensor.shape[0], 1, embed_tensor.shape[2]), embed_tensor[:, :-1]], dim=1))
             all_loss += loss.item()
             if end % 10 == 0:
                 temp_time = time.time()
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     opt = parser.parse_args()
     dataset = Dataset()
     dataset.read_config(opt.config)
-    dataset.build_alphabet(dataset.lm_dir)
+    dataset.build_alphabet(dataset.lm_dir, mode="lm")
     dataset.fix_alphabet()
     dataset.generate_instance('lm')
     dataset.build_pretrain_emb()

@@ -1,3 +1,4 @@
 *.csv
 *.model
 *.txt
+*.pyc

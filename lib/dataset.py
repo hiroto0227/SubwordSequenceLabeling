@@ -97,58 +97,34 @@ class Dataset:
         self.HP_l2 = 1e-8
 
 
-    def build_alphabet(self, input_file):
-        in_lines = open(input_file,'r').readlines()
-        for i, line in enumerate(in_lines):
-            # large corpusのとき
-            if len(line) > 3:
-                for word in tokenize(line):
-                    if sys.version_info[0] < 3:
-                        word = word.decode('utf-8')
-                    if self.number_normalized:
-                        word = normalize_word(word)
-                    if self.cammel_normalized:
-                        word = cammel_normalize_word(word)
-                    self.word_alphabet.add(word)
-                    for char in word:
-                        self.char_alphabet.add(char)
-                    ####### Sub Word ######
-                    for sw_id, sp in enumerate(self.sentence_piece_models):
-                        for sw in sp.tokenize(word):
-                            if self.number_normalized:
-                                sw = normalize_word(sw)
-                            if self.cammel_normalized:
-                                sw = cammel_normalize_word(sw)
-                            self.sw_alphabet_list[sw_id].add(sw)
-            # seq dataのとき
-            elif len(line) == 2:
-                pairs = line.strip().split()
-                word = pairs[0]
-                if sys.version_info[0] < 3:
-                    word = word.decode('utf-8')
-                if self.number_normalized:
-                    word = normalize_word(word)
-                if self.cammel_normalized:
-                    word = cammel_normalize_word(word)
-                label = pairs[-1]
+    def build_alphabet(self, input_file, mode="ner"):
+        if mode == "ner":
+            _iter = iter_seq_data(input_file)
+        elif mode == "lm":
+            _iter = iter_text_data(input_file)
+        for i, (word, label) in tqdm(enumerate(_iter)):
+            if self.number_normalized:
+                word = normalize_word(word)
+            if self.cammel_normalized:
+                word = cammel_normalize_word(word)
+            self.word_alphabet.add(word)
+            if mode == "ner":
                 self.label_alphabet.add(label)
-                self.word_alphabet.add(word)
-                for char in word:
-                    self.char_alphabet.add(char)
-                ####### Sub Word ######
-                #print("=======================================")
-                for sw_id, sp in enumerate(self.sentence_piece_models):
-                    for sw in sp.tokenize(word):
-                        if self.number_normalized:
-                            sw = normalize_word(sw)
-                        if self.cammel_normalized:
-                            sw = cammel_normalize_word(sw)
-                        self.sw_alphabet_list[sw_id].add(sw)
-        print(self.word_alphabet.instance2index)
+            for char in word:
+                self.char_alphabet.add(char)
+            ####### Sub Word ######
+            for sw_id, sp in enumerate(self.sentence_piece_models):
+                for sw in sp.tokenize(word):
+                    if self.number_normalized:
+                        sw = normalize_word(sw)
+                    if self.cammel_normalized:
+                        sw = cammel_normalize_word(sw)
+                    self.sw_alphabet_list[sw_id].add(sw)
         self.word_alphabet_size = self.word_alphabet.size()
         self.char_alphabet_size = self.char_alphabet.size()
         self.label_alphabet_size = self.label_alphabet.size()
         self.sw_alphabet_size_list = [sw_a.size() for sw_a in self.sw_alphabet_list]
+
 
     def fix_alphabet(self):
         self.word_alphabet.close()
@@ -182,7 +158,7 @@ class Dataset:
             elif name == "raw":
                 self.raw_texts, self.raw_Ids = read_instance(self.raw_dir, self.word_alphabet, self.char_alphabet, self.sw_alphabet_list, self.label_alphabet, self.number_normalized, self.cammel_normalized, self.MAX_SENTENCE_LENGTH, self.sentence_piece_models)
             elif name == "lm":
-                self.lm_texts, self.lm_Ids = read_lm_instance(self.lm_dir, self.word_alphabet, self.char_alphabet, self.sw_alphabet_list, self.number_normalized, self.cammel_normalized, self.MAX_SENTENCE_LENGTH, self.sentence_piece_models)
+                self.lm_texts, self.lm_Ids = read_instance(self.lm_dir, self.word_alphabet, self.char_alphabet, self.sw_alphabet_list, False, self.number_normalized, self.cammel_normalized, self.MAX_SENTENCE_LENGTH, self.sentence_piece_models, mode="lm")
             else:
                 print("Error: you can only generate train/dev/test instance! Illegal input:%s"%(name))
         
@@ -430,11 +406,11 @@ def read_instance(
     max_sent_length, 
     sentencepieces, 
     char_padding_size=-1, 
-    char_padding_symbol=PADDING
+    char_padding_symbol=PADDING,
+    mode="ner"
 ):
     ### Initialization ###
     sw_num = len(sentencepieces)
-    in_lines = open(input_file,'r').readlines()
     instance_texts, instance_Ids = [], []
     words, word_Ids = [], []
     chars, char_Ids = [], []
@@ -443,69 +419,72 @@ def read_instance(
     sw_bmasks_list = [[] for _ in range(sw_num)]
     labels, label_Ids = [], []
 
-    ### for sequence labeling data format i.e. CoNLL 2003
-    for z, line in tqdm(enumerate(in_lines)):
-        if len(line) > 2:
-            ### get words and labels
-            pairs = line.strip().split()
-            word = pairs[0]
-            if sys.version_info[0] < 3:
-                word = word.decode(CHARSET)
-            if number_normalized:
-                word = normalize_word(word)
-            if self.cammel_normalized:
-                word = cammel_normalize_word(word)
-            label = pairs[-1]
-            words.append(word)
+    if mode == "ner":
+        _iter = iter_seq_data(input_file)
+    elif mode == "lm":
+        _iter = iter_text_data(input_file)
+    for i, (word, label) in tqdm(enumerate(_iter)):
+        if number_normalized:
+            word = normalize_word(word)
+        if cammel_normalized:
+            word = cammel_normalize_word(word)
+        words.append(word)
+        word_Ids.append(word_alphabet.get_index(word))
+        if mode == "ner":
             labels.append(label)
-            word_Ids.append(word_alphabet.get_index(word))
             label_Ids.append(label_alphabet.get_index(label))
-            ### get char
-            char_list, char_Id = [], []
-            for char in word:
-                char_list.append(char)
-            if char_padding_size > 0:
-                char_number = len(char_list)
-                if char_number < char_padding_size:
-                    char_list = char_list + [char_padding_symbol]*(char_padding_size-char_number)
-                assert len(char_list) == char_padding_size, "Failed Char Padding."
-            for char in char_list:
-                char_Id.append(char_alphabet.get_index(char))
-            chars.append(char_list)
-            char_Ids.append(char_Id)
-
-            ## deal with sw
-            for idx, sp in enumerate(sentencepieces):
-                sw_list, sw_Id, sw_fmask, sw_bmask = [], [], [], []
-                for sw in sp.tokenize(word):
-                    if number_normalized:
-                        sw = normalize_word(sw)
-                    if self.cammel_normalized:
-                        word = cammel_normalize_word(word)
-                    sw_list.append(sw)
-                    sw_Id.append(sw_alphabet_list[idx].get_index(sw))
-                    sw_fmask.append(0)
-                    sw_bmask.append(0)
-                sw_fmask[-1] = 1
-                sw_bmask[0] = 1
-                sw_fmasks_list[idx].extend(sw_fmask)
-                sw_bmasks_list[idx].extend(sw_bmask)
-                sws_list[idx].extend(sw_list)
-                sw_Ids_list[idx].extend(sw_Id)
-        else:
-            ### append new Instance
-            if (len(words) > 0) and ((max_sent_length < 0) or (len(words) < max_sent_length)) :
+        ### get char
+        char_list, char_Id = [], []
+        for char in word:
+            char_list.append(char)
+        if char_padding_size > 0:
+            char_number = len(char_list)
+            if char_number < char_padding_size:
+                char_list = char_list + [char_padding_symbol]*(char_padding_size-char_number)
+            assert len(char_list) == char_padding_size, "Failed Char Padding."
+        for char in char_list:
+            char_Id.append(char_alphabet.get_index(char))
+        chars.append(char_list)
+        char_Ids.append(char_Id)
+        ## deal with sw
+        for idx, sp in enumerate(sentencepieces):
+            sw_list, sw_Id, sw_fmask, sw_bmask = [], [], [], []
+            for sw in sp.tokenize(word):
+                if number_normalized:
+                    sw = normalize_word(sw)
+                if cammel_normalized:
+                    word = cammel_normalize_word(word)
+                sw_list.append(sw)
+                sw_Id.append(sw_alphabet_list[idx].get_index(sw))
+                sw_fmask.append(0)
+                sw_bmask.append(0)
+            sw_fmask[-1] = 1
+            sw_bmask[0] = 1
+            sw_fmasks_list[idx].extend(sw_fmask)
+            sw_bmasks_list[idx].extend(sw_bmask)
+            sws_list[idx].extend(sw_list)
+            sw_Ids_list[idx].extend(sw_Id)
+        ### append new Instance
+        if (len(words) > 0) and ((max_sent_length < 0) or (len(words) < max_sent_length)) :
+            if mode == "ner":
                 instance_texts.append([words, chars, sws_list, labels])
                 instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list, label_Ids])
-            words, word_Ids = [], []
-            chars, char_Ids = [], []
-            sws_list, sw_Ids_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-            sw_fmasks_list, sw_bmasks_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-            labels, label_Ids = [], []
+            elif mode == "lm":
+                instance_texts.append([words, chars, sws_list])
+                instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list])
+        words, word_Ids = [], []
+        chars, char_Ids = [], []
+        sws_list, sw_Ids_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
+        sw_fmasks_list, sw_bmasks_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
+        labels, label_Ids = [], []
 
     if (len(words) > 0) and ((max_sent_length < 0) or (len(words) < max_sent_length)) :
-        instance_texts.append([words, chars, sws_list, labels])
-        instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list, label_Ids])
+        if mode == "ner":
+            instance_texts.append([words, chars, sws_list, labels])
+            instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list, label_Ids])
+        elif mode == "lm":
+            instance_texts.append([words, chars, sws_list])
+            instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list])
         words, word_Ids = [], []
         chars, char_Ids = [], []
         sws_list, sw_Ids_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
@@ -514,85 +493,18 @@ def read_instance(
     return instance_texts, instance_Ids
 
 
-def read_lm_instance(
-    input_file,
-    word_alphabet, 
-    char_alphabet, 
-    sw_alphabet_list, 
-    number_normalized, 
-    cammel_normalized,
-    max_sent_length, 
-    sentencepieces, 
-    char_padding_size=-1, 
-    char_padding_symbol=PADDING
-):
-    ### Initialization ###
-    sw_num = len(sentencepieces)
-    in_lines = open(input_file,'r').read()
-    instance_texts, instance_Ids = [], []
-    words, word_Ids = [], []
-    chars, char_Ids = [], []
-    sws_list, sw_Ids_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-    sw_fmasks_list = [[] for _ in range(sw_num)]
-    sw_bmasks_list = [[] for _ in range(sw_num)]
+def iter_seq_data(file_name):
+    """parse seq data"""
+    in_lines = open(file_name,'r').readlines()
+    for z, line in tqdm(enumerate(in_lines)):
+        if len(line) > 2:
+            pairs = line.strip().split()
+            yield pairs[0], pairs[1]
 
-    ### for sequence labeling data format i.e. CoNLL 2003
-    for z, line in tqdm(enumerate(in_lines.split("\n"))):
-        # if z == 200:
-        #     break
+
+def iter_text_data(file_name):
+    """parse text data"""
+    in_lines = open(file_name,'r').readlines()
+    for i, line in tqdm(enumerate(in_lines)):
         for word in tokenize(line):
-            ### get word
-            if number_normalized:
-                word = normalize_word(word)
-            if cammel_normalized:
-                word = cammel_normalize_word(word)
-            words.append(word)
-            word_Ids.append(word_alphabet.get_index(word))
-            ### get char
-            char_list, char_Id = [], []
-            for char in word:
-                char_list.append(char)
-            if char_padding_size > 0:
-                char_number = len(char_list)
-                if char_number < char_padding_size:
-                    char_list = char_list + [char_padding_symbol]*(char_padding_size-char_number)
-                assert len(char_list) == char_padding_size, "Failed Char Padding."
-            for char in char_list:
-                char_Id.append(char_alphabet.get_index(char))
-            chars.append(char_list)
-            char_Ids.append(char_Id)
-            ## deal with sw
-            for idx, sp in enumerate(sentencepieces):
-                sw_list, sw_Id, sw_fmask, sw_bmask = [], [], [], []
-                for sw in sp.tokenize(word):
-                    if number_normalized:
-                        sw = normalize_word(sw)
-                    if cammel_normalized:
-                        word = cammel_normalize_word(word)
-                    sw_list.append(sw)
-                    sw_Id.append(sw_alphabet_list[idx].get_index(sw))
-                    sw_fmask.append(0)
-                    sw_bmask.append(0)
-                sw_fmask[-1] = 1
-                sw_bmask[0] = 1
-                sw_fmasks_list[idx].extend(sw_fmask)
-                sw_bmasks_list[idx].extend(sw_bmask)
-                sws_list[idx].extend(sw_list)
-                sw_Ids_list[idx].extend(sw_Id)
-        ### append new Instance
-        if (len(words) > 0) and ((max_sent_length < 0) or (len(words) < max_sent_length)):
-            instance_texts.append([words, chars, sws_list])
-            instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list])
-        words, word_Ids = [], []
-        chars, char_Ids = [], []
-        sws_list, sw_Ids_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-        sw_fmasks_list, sw_bmasks_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-
-    if (len(words) > 0) and ((max_sent_length < 0) or (len(words) < max_sent_length)) :
-        instance_texts.append([words, chars, sws_list])
-        instance_Ids.append([word_Ids, char_Ids, sw_Ids_list, sw_fmasks_list, sw_bmasks_list])
-        words, word_Ids = [], []
-        chars, char_Ids = [], []
-        sws_list, sw_Ids_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-        sw_fmasks_list, sw_bmasks_list = [[] for _ in range(sw_num)], [[] for _ in range(sw_num)]
-    return instance_texts, instance_Ids
+            yield word, False
