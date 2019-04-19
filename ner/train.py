@@ -2,13 +2,16 @@ import argparse
 import time
 import random
 import gc
+import sys
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from lib.data import Data
+sys.path.append("./")
+from lib.dataset import Dataset
+from lib.batchify import batchify_with_label
 from evaluate import evaluate
 from model.seqlabel import SeqLabel
 
@@ -53,16 +56,20 @@ def train(data):
     save_data_name = data.model_dir +".dset"
     data.save(save_data_name)
     model = SeqLabel(data)
+    if data.pretrain_model_dir:
+        pretrain_state_dict = torch.load(data.pretrain_model_dir + ".model", map_location=lambda storage, loc: storage)
+        model.load_state_dict(pretrain_state_dict)
     if data.optimizer.lower() == "sgd":
-        optimizer = optim.SGD(model.parameters(), lr=data.HP_lr, momentum=data.HP_momentum,weight_decay=data.HP_l2)
+        optimizer = optim.SGD(model.parameters(), lr=data.lr, momentum=data.momentum,weight_decay=data.l2)
+    print(model)
     best_dev = -10
     ## start training
-    for idx in range(data.HP_iteration):
+    for idx in range(data.ner_epoch):
         epoch_start = time.time()
         temp_start = epoch_start
-        print("Epoch: %s/%s" %(idx,data.HP_iteration))
+        print("Epoch: %s/%s" %(idx,data.ner_epoch))
         if data.optimizer == "SGD":
-            optimizer = lr_decay(optimizer, idx, data.HP_lr_decay, data.HP_lr)
+            optimizer = lr_decay(optimizer, idx, data.lr_decay, data.lr)
         instance_count = 0
         sample_id = 0
         sample_loss = 0
@@ -76,7 +83,7 @@ def train(data):
         best_epoch = 0
         best_dev_scores = (-1, -1, -1)
         best_test_scores = (-1, -1, -1)
-        batch_size = data.HP_batch_size
+        batch_size = data.batch_size
         batch_id = 0
         train_num = len(data.train_Ids)
         total_batch = train_num//batch_size+1
@@ -88,7 +95,7 @@ def train(data):
             instance = data.train_Ids[start:end]
             if not instance:
                 continue
-            batch_word, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask = batchify_with_label(instance, data.HP_gpu, True)
+            batch_word, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask = batchify_with_label(instance, data.gpu, True)
             instance_count += 1
             loss, tag_seq = model.neg_log_likelihood_loss(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask)
             right, whole = predict_check(tag_seq, batch_label, mask)
@@ -96,7 +103,7 @@ def train(data):
             whole_token += whole
             sample_loss += loss.item()
             total_loss += loss.item()
-            if end%500 == 0:
+            if end%1000 == 0:
                 temp_time = time.time()
                 temp_cost = temp_time - temp_start
                 temp_start = temp_time
@@ -117,41 +124,31 @@ def train(data):
         epoch_cost = epoch_finish - epoch_start
         print("Epoch: %s training finished. Time: %.2fs, speed: %.2fst/s,  total loss: %s"%(idx, epoch_cost, train_num/epoch_cost, total_loss))
         print("totalloss:", total_loss)
-        if total_loss > 1e8 or str(total_loss) == "nan":
+        if total_loss > 1e12 or str(total_loss) == "nan":
             print("ERROR: LOSS EXPLOSION (>1e8) ! PLEASE SET PROPER PARAMETERS AND STRUCTURE! EXIT....")
             exit(1)
         # continue
         speed, acc, p, r, f, _,_ = evaluate(data, model, "dev")
         dev_finish = time.time()
         dev_cost = dev_finish - epoch_finish
-
-        if data.seg:
-           current_score = f
-           print("Dev: time: %.2fs, speed: %.2fst/s; acc: %.4f, p: %.4f, r: %.4f, f: %.4f"%(dev_cost, speed, acc, p, r, f))
-        else:
-           current_score = acc
-           print("Dev: time: %.2fs speed: %.2fst/s; acc: %.4f"%(dev_cost, speed, acc))
-
+        current_score = acc
+        print("Valid: time: %.2fs speed: %.2fst/s; acc: %.4f"%(dev_cost, speed, acc))
+        print(f"Valid: precition={p}, recall={r}, fscore={f}")
         if current_score > best_dev:
-           if data.seg:
-               print("Exceed previous best f score:", best_dev)
-           else:
-               print("Exceed previous best acc score:", best_dev)
-           model_name = data.model_dir +'.'+ str(idx) + ".model"
-           print("Save current best model in file:", model_name)
-           torch.save(model.state_dict(), model_name)
-           best_epoch = idx
-           best_dev_scores = (p, r, f)
-           best_dev = current_score
+            print("Exceed previous best acc score:", best_dev)
+            model_name = data.model_dir +'.'+ str(idx) + ".model"
+            print("Save current best model in file:", model_name)
+            torch.save(model.state_dict(), model_name)
+            best_epoch = idx
+            best_dev_scores = (p, r, f)
+            best_dev = current_score
 
         ## decode test
         speed, acc, p, r, f, _,_ = evaluate(data, model, "test")
         test_finish = time.time()
         test_cost = test_finish - dev_finish
-        if data.seg:
-           print("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f, p: %.4f, r: %.4f, f: %.4f"%(test_cost, speed, acc, p, r, f))
-        else:
-           print("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f"%(test_cost, speed, acc))
+        print("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f"%(test_cost, speed, acc))
+        print(f"Test: precition={p}, recall={r}, fscore={f}")
         if best_test_scores[2] < f:
             best_test_scores = (p, r, f)
         # if  idx % 10 == 0:
@@ -165,16 +162,21 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Subword Sequence Labeling Training')
     parser.add_argument('--config', help='Configuration File')
     args = parser.parse_args()
-    data = Data()
-    data.HP_gpu = torch.cuda.is_available()
-    data.read_config(args.config)
-    status = data.status.lower()
-
-    if status == 'train':
-        print("MODEL: train")
-        data_initialization(data)
-        data.generate_instance('train')
-        data.generate_instance('dev')
-        data.generate_instance('test')
-        data.build_pretrain_emb()
-        train(data)
+    dataset = Dataset()
+    dataset.gpu = torch.cuda.is_available()
+    dataset.read_config(args.config)
+    if dataset.pretrain_model_dir:
+        # pretrainを行ったdsetを読み込み、AlphabetをPretrainにする。
+        lm_dset = Dataset()
+        lm_dset.load(f"{dataset.pretrain_model_dir}.dset")
+        dataset.load_lm_dset_alphabets(lm_dset)
+        print("===============================")
+        dataset.describe()
+    else:
+        data_initialization(dataset)
+    dataset.generate_instance('train')
+    dataset.generate_instance('dev')
+    dataset.generate_instance('test')
+    #dataset.build_pretrain_emb()
+    dataset.describe()
+    train(dataset)

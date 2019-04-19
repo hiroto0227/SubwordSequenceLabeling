@@ -2,7 +2,8 @@ import time
 import sys
 import argparse
 
-from lib.dataset import batchify_with_label
+sys.path.append("./")
+from lib.batchify import batchify_with_label
 
 
 def evaluate(data, model, name):
@@ -22,11 +23,10 @@ def evaluate(data, model, name):
     sentence_list = []
     ## set model in eval model
     model.eval()
-    batch_size = data.HP_batch_size
+    batch_size = data.batch_size
     start_time = time.time()
     train_num = len(instances)
     total_batch = train_num//batch_size+1
-    print(len(instances))
     for batch_id in range(total_batch):
         start = batch_id*batch_size
         end = (batch_id+1)*batch_size
@@ -35,7 +35,7 @@ def evaluate(data, model, name):
         instance = instances[start:end]
         if not instance:
             continue
-        batch_word, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask  = batchify_with_label(instance, data.HP_gpu, False)
+        batch_word, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask  = batchify_with_label(instance, data.gpu, False)
         tag_seq = model(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, mask)
         # print("tag:",tag_seq)
         pred_label, gold_label = recover_label(tag_seq, batch_label, mask, data.label_alphabet, batch_wordrecover)

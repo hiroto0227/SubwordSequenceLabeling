@@ -51,7 +51,7 @@ def build_pretrain_embedding(embedding_path, word_alphabet, embedd_dim=100, norm
     pretrained_size = len(embedd_dict)
     
     print("""Embedding:     
-        pretrain word:{}, 
+        In GloVe word:{}, 
         prefect match:{}, 
         case_match:{}, 
         oov:{}, 
@@ -65,6 +65,7 @@ def norm2one(vec):
     return vec/root_sum_square
 
 def load_pretrain_emb(embedding_path):
+    charsets = set()
     embedd_dim = -1
     embedd_dict = dict()
     with open(embedding_path, 'r') as file:
@@ -86,13 +87,21 @@ def load_pretrain_emb(embedding_path):
                     first_col = tokens[0]
                 embedd_dict[first_col] = embedd
             except ValueError:
+                charsets.update([ord(c) for c in line])
                 print("Value Error: {}".format(line))
+    print("=============== Failed load pretraining charsets ====================== ")
+    print(charsets)
     return embedd_dict, embedd_dim
+
+
+SPECIAL_CHARS = "|".join([chr(i) for i in range(127, 161)])
+SPECIAL_BLANKS = "|".join([chr(i) for i in range(8191, 8207)])
 
 
 def tokenize(text):
     """textをtoken単位に分割したリストを返す。"""
-    tokens = re.split("( | |\xa0|\t|\n|\d+|…|\'|\"|·|~|↔|•|\!|@|#|\$|%|\^|&|\*|-|=|_|\+|ˉ|\(|\)|\[|\]|\{|\}|;|‘|:|“|,|\.|\/|<|>|×|>|<|≤|≥|↑|↓|→|¬|®|•|′|°|~|≈|\?|Δ|÷|≠|‘|’|“|”|§|£|€|™|⋅|-|\u2000|⁺|\u2009)", text)
+    text = re.sub(f"({SPECIAL_CHARS}|{SPECIAL_BLANKS})", " ", text)
+    tokens = re.split("( | |\t|\n|\d+|…|\'|\"|·|~|↔|•|\!|@|#|\$|%|\^|&|\*|-|=|_|\+|ˉ|\(|\)|\[|\]|\{|\}|;|‘|:|“|,|\.|\/|<|>|×|>|<|≤|≥|↑|↓|→|¬|®|•|′|°|~|≈|\?|Δ|÷|≠|‘|’|“|”|§|£|€|™|⋅|-|⁺)", text)
     tokens = [token.replace(' ',  '') for token in tokens]
     return list(filter(None, tokens))
 

@@ -1,42 +1,39 @@
 import re
 
 def config_file_to_dict(input_file):
+    print("============= load config file ==================")
     config = {}
     fins = open(input_file,'r').readlines()
     for line in fins:
         if len(line) > 0 and line[0] == "#":
             continue
         if "=" in line:
-            pair = line.strip().split('#', 1)[0].split('=', 1)
-            item = pair[0]
-            if item == "feature":
-                if item not in config:
-                    feat_dict = {}
-                    config[item] = feat_dict
-                feat_dict = config[item]
-                new_pair = pair[-1].split()
-                feat_name = new_pair[0]
-                one_dict = {}
-                one_dict["emb_dir"] = None
-                one_dict["emb_size"] = 10
-                one_dict["emb_norm"] = False
-                if len(new_pair) > 1:
-                    for idx in range(1, len(new_pair)):
-                        conf_pair = new_pair[idx].split('=')
-                        if conf_pair[0] == "emb_dir":
-                            one_dict["emb_dir"] = conf_pair[-1]
-                        elif conf_pair[0] == "emb_size":
-                            one_dict["emb_size"] = int(conf_pair[-1])
-                        elif conf_pair[0] == "emb_norm":
-                            one_dict["emb_norm"] = str2bool(conf_pair[-1])
-                feat_dict[feat_name] = one_dict
-                # print "feat",feat_dict
+            item, value = line.strip().split('#', 1)[0].split('=', 1)
+            value_type = str2type(value)
+            print(f"{item}={value}: {value_type}")
+            if value_type == bool:
+                config[item] = str2bool(value)
+            elif value_type == float:
+                config[item] = float(value)
+            elif value_type == int:
+                config[item] = int(value)
+            elif value_type == list:
+                config[item] = str2list(value)
             else:
-                if item in config:
-                    print("Warning: duplicated config item found: %s, updated."%(pair[0]))
-                config[item] = pair[-1]
+                config[item] = value
     return config
 
+def str2type(string):
+    if re.fullmatch("(True|False)", string):
+        return bool
+    elif re.fullmatch("[0-9]+", string):
+        return int
+    elif re.fullmatch("[0-9]+\.[0-9]+", string):
+        return float
+    elif re.fullmatch("\[.+\]", string):
+        return list
+    else:
+        return str
 
 def str2bool(string):
     if string == "True" or string == "true" or string == "TRUE":

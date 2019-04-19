@@ -10,6 +10,7 @@ class Alphabet:
         self.label = label
         self.instance2index = {}
         self.instances = []
+        self.instance2freq = {}
         self.keep_growing = keep_growing
 
         # Index 0 is occupied by default, all else following.
@@ -31,7 +32,24 @@ class Alphabet:
         if instance not in self.instance2index:
             self.instances.append(instance)
             self.instance2index[instance] = self.next_index
+            self.instance2freq[instance] = 1
             self.next_index += 1
+        else:
+            self.instance2freq[instance] += 1
+    
+    def cut_vocab(self, min_count):
+        cut_count = 0
+        new_instances = []
+        for instance, freq in self.instance2freq.items():
+            if freq >= min_count or instance == self.UNKNOWN:
+                new_instances.append(instance)
+            else:
+                cut_count += 1
+        # reset instances
+        self.instances = new_instances
+        self.instance2index = {instance: i for i, instance in enumerate(self.instances)}
+        print(f"cut_vocab: {cut_count} instance.")
+
 
     def get_index(self, instance):
         try:

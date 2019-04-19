@@ -8,13 +8,13 @@ import sentencepiece as spm
 
 
 class ChemSentencePiece:
-    spe: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
+    #spe: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
     SP_DIR: str = "/home/sekine/SubwordSequenceLabeling/Repository/SentencePiece/"
 
     def __init__(self):
+        self.spe = spm.SentencePieceProcessor()
         pass
 
-    @classmethod
     def load(self, sp_path: str):
         self.spe.Load(sp_path)
 
@@ -29,11 +29,13 @@ class ChemSentencePiece:
 
     def tokenize(self, text: str, B_TAG=True) -> List[str]:
         """B_TAGがTrueのときはSubwordの先頭を表す▁を表示する。"""
-        tokens: list = []
-        for token in self.spe.EncodeAsPieces(text):
-            if not B_TAG:
-                token = token.replace('▁', '')
-            tokens.extend(token)
+        # 記号1文字のみをtokenizeすると先頭文字とその記号に分かれてしまう。
+        if len(text) == 1:
+            tokens = [f'▁{text}']
+        else:
+            tokens = self.spe.EncodeAsPieces(text)
+        if not B_TAG:    
+            tokens = [token.replace('▁', '') for token in tokens]
         return tokens
 
 if __name__ == "__main__":

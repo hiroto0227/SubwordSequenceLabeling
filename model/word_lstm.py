@@ -10,40 +10,41 @@ from model.subwordrep import SubwordRep
 
 class WordLSTM(nn.Module):
     def __init__(self, dataset):
-        super(WordLSTM, self).__init__()
-        self.gpu = dataset.HP_gpu
-        self.batch_size = dataset.HP_batch_size
+        super().__init__()
+        self.gpu = dataset.gpu
+        self.batch_size = dataset.batch_size
         self.sw_num = dataset.sw_num
         self.input_size = dataset.word_emb_dim
 
         # char
-        self.char_rep = CharRep(dataset.char_alphabet_size,
+        self.char_rep = CharRep(dataset.char_alphabet.size(),
                                 dataset.pretrain_char_embedding,
                                 dataset.char_emb_dim,
-                                dataset.HP_char_hidden_dim,
-                                dataset.HP_dropout,
-                                dataset.HP_gpu)
-        self.input_size += dataset.HP_char_hidden_dim
+                                dataset.char_hidden_dim,
+                                dataset.dropout,
+                                dataset.gpu)
+        self.input_size += dataset.char_hidden_dim
 
         # subword
         self.subword_reps = [SubwordRep(
-            alphabet_size=dataset.sw_alphabet_size_list[i],
+            alphabet_size=dataset.sw_alphabet_list[i].size(),
             embedding_dim=dataset.sw_emb_dim,
-            hidden_dim=dataset.HP_sw_hidden_dim,
-            dropout=dataset.HP_dropout,
-            gpu=dataset.HP_gpu) for i in range(self.sw_num)]
-        self.input_size += dataset.HP_sw_hidden_dim * self.sw_num
+            hidden_dim=dataset.sw_hidden_dim,
+            dropout=dataset.dropout,
+            gpu=dataset.gpu) for i in range(self.sw_num)]
+        self.input_size += dataset.sw_hidden_dim * self.sw_num
+        print(self.subword_reps)
 
         # word
         self.embedding_dim = dataset.word_emb_dim
-        self.drop = nn.Dropout(dataset.HP_dropout)
+        self.drop = nn.Dropout(dataset.dropout)
         self.word_embedding = nn.Embedding(dataset.word_alphabet.size(), self.embedding_dim)
         if dataset.pretrain_word_embedding is not None:
             self.word_embedding.weight.data.copy_(torch.from_numpy(dataset.pretrain_word_embedding))
         else:
             self.word_embedding.weight.data.copy_(torch.from_numpy(self.random_embedding(dataset.word_alphabet.size(), self.embedding_dim)))
-        self.droplstm = nn.Dropout(dataset.HP_dropout)
-        lstm_hidden = dataset.HP_hidden_dim // 2
+        self.droplstm = nn.Dropout(dataset.dropout)
+        lstm_hidden = dataset.hidden_dim // 2
         self.lstm = nn.LSTM(self.input_size, lstm_hidden, num_layers=1, batch_first=True, bidirectional=True)
 
         if self.gpu:
