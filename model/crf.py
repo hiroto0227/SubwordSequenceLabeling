@@ -29,9 +29,7 @@ def log_sum_exp(vec, m_size):
 class CRF(nn.Module):
 
     def __init__(self, tagset_size, gpu):
-        #super(CRF, self).__init__()
         super().__init__()
-        print("build CRF...")
         self.gpu = gpu
         # Matrix of transition parameters.  Entry i,j is the score of transitioning from i to j.
         self.tagset_size = tagset_size

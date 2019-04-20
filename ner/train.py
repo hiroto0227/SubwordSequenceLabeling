@@ -1,39 +1,61 @@
 import argparse
-import time
-import random
 import gc
+from itertools import chain
+import os
+import random
+import re
 import sys
+import time
+from typing import List
 
+from gensim.corpora import Dictionary
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
+from tqdm import tqdm
 
 sys.path.append("./")
-from lib.dataset import Dataset
-from lib.batchify import batchify_with_label
+from chem_sentencepiece.chem_sentencepiece import ChemSentencePiece
+from config import config_dic
+from label import UNKNOWN, PADDING, NUM
+from model.seqmodel import SeqModel
 from evaluate import evaluate
-from model.seqlabel import SeqLabel
-
+from preprocess import get_char_features, get_sw_features, get_word_features, get_label_features
 
 seed_num = 0
-random.seed(seed_num)
-torch.manual_seed(seed_num)
-np.random.seed(seed_num)
+random.seed(0)
+
+def load_seq_data(file_path: str, number_normalize=True) -> (List[List[str]], List[List[str]]):
+    """下記のフォーマットのデータをWordとLabelのdocumentsの型にして返す。
+    word label
+    word label
+    word label
+    """
+    with open(file_path, "rt", encoding="utf-8") as f:
+        lines: List[str] = f.read().split("\n")
+    word_documents, label_documents = [], []
+    word_document, label_document = [], []
+    num_re = re.compile("\d+\.*\d*")
+    for line in tqdm(lines):
+        if len(line) > 0:
+            word, label = line.split(" ")
+            if number_normalize and num_re.match(word):
+                word = NUM
+            word_document.append(word)
+            label_document.append(label)
+        elif len(word_document):
+            word_documents.append(word_document)
+            label_documents.append(label_document)
+            word_document, label_document = [], []
+    return word_documents, label_documents
 
 
-def data_initialization(data):
-    data.build_alphabet(data.train_dir)
-    data.build_alphabet(data.dev_dir)
-    data.build_alphabet(data.test_dir)
-    data.fix_alphabet()
+def get_sw_documents(word_documents: List[List[str]]) -> List[List[str]]:
+    sw_documents = []
+    for word_document in word_documents:
+        sws = [sp.tokenize(word) for word in word_document]
+        sw_documents.append(list(chain.from_iterable(sws)))
+    return sw_documents
 
-def lr_decay(optimizer, epoch, decay_rate, init_lr):
-    lr = init_lr/(1+decay_rate*epoch)
-    print(" Learning rate is set as:", lr)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    return optimizer
 
 def predict_check(pred_variable, gold_variable, mask_variable):
     """
@@ -52,131 +74,136 @@ def predict_check(pred_variable, gold_variable, mask_variable):
     return right_token, total_token
 
 
-def train(data):
-    save_data_name = data.model_dir +".dset"
-    data.save(save_data_name)
-    model = SeqLabel(data)
-    if data.pretrain_model_dir:
-        pretrain_state_dict = torch.load(data.pretrain_model_dir + ".model", map_location=lambda storage, loc: storage)
-        model.load_state_dict(pretrain_state_dict)
-    if data.optimizer.lower() == "sgd":
-        optimizer = optim.SGD(model.parameters(), lr=data.lr, momentum=data.momentum,weight_decay=data.l2)
-    print(model)
-    best_dev = -10
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str)
+    args = parser.parse_args()
+
+    # load sentence piece
+    sp = ChemSentencePiece()
+    sp.load(config_dic.get("sp_path"))
+
+    # load train data
+    print("=========== Load train data ===========")
+    train_word_documents, train_label_documents = load_seq_data(os.path.join(config_dic.get("ner_input_dir"), "train.bioes"), config_dic.get("number_normalize"))
+    valid_word_documents, valid_label_documents = load_seq_data(os.path.join(config_dic.get("ner_input_dir"), "valid.bioes"), config_dic.get("number_normalize"))
+    test_word_documents, test_label_documents = load_seq_data(os.path.join(config_dic.get("ner_input_dir"), "test.bioes"), config_dic.get("number_normalize"))
+    
+    train_char_documents = [[[char for char in word] for word in document] for document in train_word_documents] # Document数 x 文字数
+    valid_char_documents = [[[char for char in word] for word in document] for document in valid_word_documents]
+    test_char_documents = [[[char for char in word] for word in document] for document in test_word_documents]
+
+    train_sw_documents = get_sw_documents(train_word_documents)
+    valid_sw_documents = get_sw_documents(valid_word_documents)
+    test_sw_documents = get_sw_documents(test_word_documents)
+
+    # load vocabulary
+    print("=========== Build vocabulary ===========")
+    if config_dic.get("vocab_dir"):
+        word_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{config_dic.get('train_name')}.word.dic"))
+        char_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{config_dic.get('train_name')}.char.dic"))
+        sw_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{config_dic.get('train_name')}.sw.dic"))
+    else:
+        special_token_dict = {PADDING: 0, UNKNOWN: 1}
+        word_dic = Dictionary()
+        word_dic.patch_with_special_tokens(special_token_dict)
+        char_dic = Dictionary()
+        char_dic.patch_with_special_tokens(special_token_dict)
+        sw_dic = Dictionary()
+        sw_dic.patch_with_special_tokens(special_token_dict)
+    label_dic = Dictionary(train_label_documents)
+    label_dic.patch_with_special_tokens({PADDING: 0})
+    label_dic.id2token = {_id: label for label, _id in label_dic.token2id.items()}
+
+    # add vocabulary
+    word_dic.add_documents(train_word_documents)
+    char_dic.add_documents(list(chain.from_iterable(train_char_documents)))
+    sw_dic.add_documents(train_sw_documents)
+    
+    ################### Train Initialize ########################
+    if config_dic.get("gpu") and torch.cuda.is_available():
+        print("============== Use GPU ================")
+        config_dic["gpu"] = True
+    else:
+        config_dic["gpu"] = False
+    seq_model = SeqModel(config_dic, len(word_dic.token2id), len(char_dic.token2id), len(sw_dic.token2id), len(label_dic.token2id), None)
+    # load pretrained language model
+    if config_dic.get("lm_model_dir"):
+        lm_state_dict = torch.load(os.path.join(config_dic.get("lm_model_dir"), f"{config_dic.get('train_name')}.model"))
+        seq_model.load_expanded_state_dict(lm_state_dict)
+    optimizer = torch.optim.SGD(seq_model.parameters(), lr=config_dic.get("ner_lr"), weight_decay=0.01)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    print(seq_model)
+
     ## start training
-    for idx in range(data.ner_epoch):
-        epoch_start = time.time()
-        temp_start = epoch_start
-        print("Epoch: %s/%s" %(idx,data.ner_epoch))
-        if data.optimizer == "SGD":
-            optimizer = lr_decay(optimizer, idx, data.lr_decay, data.lr)
-        instance_count = 0
-        sample_id = 0
-        sample_loss = 0
-        total_loss = 0
-        right_token = 0
-        whole_token = 0
-        random.shuffle(data.train_Ids)
-        ## set model in train model
-        model.train()
-        model.zero_grad()
-        best_epoch = 0
-        best_dev_scores = (-1, -1, -1)
-        best_test_scores = (-1, -1, -1)
-        batch_size = data.batch_size
-        batch_id = 0
-        train_num = len(data.train_Ids)
-        total_batch = train_num//batch_size+1
-        for batch_id in range(total_batch):
-            start = batch_id*batch_size
-            end = (batch_id+1)*batch_size
-            if end >train_num:
-                end = train_num
-            instance = data.train_Ids[start:end]
-            if not instance:
-                continue
-            batch_word, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask = batchify_with_label(instance, data.gpu, True)
-            instance_count += 1
-            loss, tag_seq = model.neg_log_likelihood_loss(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_sws, batch_swlens, batch_swrecovers, batch_swfmask, batch_swbmask, batch_label, mask)
-            right, whole = predict_check(tag_seq, batch_label, mask)
-            right_token += right
-            whole_token += whole
-            sample_loss += loss.item()
-            total_loss += loss.item()
-            if end%1000 == 0:
-                temp_time = time.time()
-                temp_cost = temp_time - temp_start
-                temp_start = temp_time
-                print("    Instance: %s; Time: %.2fs; loss: %.4f; acc: %s/%s=%.4f"%(end, temp_cost, sample_loss, right_token, whole_token,(right_token+0.)/whole_token))
-                if sample_loss > 1e8 or str(sample_loss) == "nan":
-                    print("ERROR: LOSS EXPLOSION (>1e8) ! PLEASE SET PROPER PARAMETERS AND STRUCTURE! EXIT....")
+    epoch = config_dic.get("ner_epoch", 1)
+    for epoch_i in range(epoch):
+        print("Epoch: %s/%s" %(epoch_i, epoch))
+        lr_scheduler.step()
+        print(f"Learning Rate: {lr_scheduler.get_lr()}")
+        # shuffle
+        random_ids = list(range(len(train_word_documents)))
+        random.shuffle(random_ids)
+        seq_model.train()
+    
+        #####################  Batch Initialize ############################
+        batch_ave_loss = 0
+        batch_size = config_dic.get("ner_batch_size")
+        batch_steps = len(train_word_documents) // batch_size
+        for batch_i in tqdm(range(batch_steps)):
+            start_time = time.time()
+            optimizer.step()
+            seq_model.zero_grad()
+
+            batch_ids = random_ids[batch_i * batch_size: (batch_i + 1) * batch_size - 1]
+            batch_word_documents = [train_word_documents[i] for i in batch_ids]
+            batch_label_documents = [train_label_documents[i] for i in batch_ids]
+            word_features = get_word_features(batch_word_documents, word_dic, config_dic.get("gpu"))
+            char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
+            sw_features = get_sw_features(batch_word_documents, sw_dic, sp, config_dic.get("gpu"))
+            label_features = get_label_features(batch_label_documents, label_dic, config_dic.get("gpu"))
+            # print(f"word_shape: {word_features.get('word_ids').shape}")
+            loss, train_tag_seq = seq_model.neg_log_likelihood_loss(word_features, char_features, sw_features, label_features)
+            batch_ave_loss += loss.data
+            loss.backward()
+
+            if batch_i % 10 == 0:
+                if batch_ave_loss > 1e8 or str(loss) == "nan":
+                    print("Error: Loss Explosion (>1e8)! EXIT...")
                     exit(1)
                 sys.stdout.flush()
-                sample_loss = 0
-            loss.backward()
-            optimizer.step()
-            model.zero_grad()
-        temp_time = time.time()
-        temp_cost = temp_time - temp_start
-        print("    Instance: %s; Time: %.2fs; loss: %.4f; acc: %s/%s=%.4f"%(end, temp_cost, sample_loss, right_token, whole_token,(right_token+0.)/whole_token))
+                right_token, total_token = predict_check(train_tag_seq, label_features.get("label_ids"), word_features.get("masks"))
+                print(f"""Batch: {batch_i}; Time(sec/batch): {time.time() - start_time:.4f}; Loss: {batch_ave_loss:.4f} Right: {right_token}, Total: {total_token}, Accuracy: {right_token / total_token:.4f}""") 
+                batch_ave_loss = 0
 
-        epoch_finish = time.time()
-        epoch_cost = epoch_finish - epoch_start
-        print("Epoch: %s training finished. Time: %.2fs, speed: %.2fst/s,  total loss: %s"%(idx, epoch_cost, train_num/epoch_cost, total_loss))
-        print("totalloss:", total_loss)
-        if total_loss > 1e12 or str(total_loss) == "nan":
-            print("ERROR: LOSS EXPLOSION (>1e8) ! PLEASE SET PROPER PARAMETERS AND STRUCTURE! EXIT....")
-            exit(1)
-        # continue
-        speed, acc, p, r, f, _,_ = evaluate(data, model, "dev")
-        dev_finish = time.time()
-        dev_cost = dev_finish - epoch_finish
-        current_score = acc
-        print("Valid: time: %.2fs speed: %.2fst/s; acc: %.4f"%(dev_cost, speed, acc))
-        print(f"Valid: precition={p}, recall={r}, fscore={f}")
-        if current_score > best_dev:
-            print("Exceed previous best acc score:", best_dev)
-            model_name = data.model_dir +'.'+ str(idx) + ".model"
-            print("Save current best model in file:", model_name)
-            torch.save(model.state_dict(), model_name)
-            best_epoch = idx
-            best_dev_scores = (p, r, f)
-            best_dev = current_score
+        ################ valid predict check #####################
+        print("============== Predict Check==========")
+        true_seqs, pred_seqs = [], []
+        right_token, total_token = 0, 0
+        batch_steps = len(valid_word_documents) // batch_size
+        random_ids = list(range(len(train_word_documents)))
+        for batch_i in tqdm(range(batch_steps)):
+            batch_ids = random_ids[batch_i * batch_size: (batch_i + 1) * batch_size - 1]
+            batch_word_documents = [train_word_documents[i] for i in batch_ids]
+            batch_label_documents = [train_label_documents[i] for i in batch_ids]
 
-        ## decode test
-        speed, acc, p, r, f, _,_ = evaluate(data, model, "test")
-        test_finish = time.time()
-        test_cost = test_finish - dev_finish
-        print("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f"%(test_cost, speed, acc))
-        print(f"Test: precition={p}, recall={r}, fscore={f}")
-        if best_test_scores[2] < f:
-            best_test_scores = (p, r, f)
-        # if  idx % 10 == 0:
-        #     model_name = data.model_dir +'.'+ str(idx) + ".model"
-        #     torch.save(model.state_dict(), model_name)
+            valid_word_features = get_word_features(batch_word_documents, word_dic, config_dic.get("gpu"))
+            valid_char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
+            valid_sw_features = get_sw_features(batch_word_documents, sw_dic, sp, config_dic.get("gpu"))
+            valid_label_features = get_label_features(batch_label_documents, label_dic, config_dic.get("gpu"))
+            valid_tag_seq = seq_model.forward(valid_word_features, valid_char_features, valid_sw_features)
+            rt, tt = predict_check(valid_tag_seq, valid_label_features.get("label_ids"), valid_word_features.get("masks"))
+            right_token += rt
+            total_token += tt
+            ################ evaluate by precision, recall and fscore ###################
+            masks = valid_word_features.get("masks")
+            true_seqs.extend([label_dic.id2token[int(label_id)] for label_id in valid_label_features.get("label_ids").masked_select(masks)])
+            pred_seqs.extend([label_dic.id2token[int(label_id)] for label_id in valid_tag_seq.masked_select(masks)])
+        precision, recall, fscore = evaluate(true_seqs, pred_seqs)
+        print(f"Right: {right_token}, Total: {total_token}, Accuracy: {right_token / total_token:.4f}")
+        print(f"Precision: {precision}, Recall: {recall}, Fscore: {fscore}")
+
         gc.collect()
-    return best_epoch, best_dev_scores, best_test_scores
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Subword Sequence Labeling Training')
-    parser.add_argument('--config', help='Configuration File')
-    args = parser.parse_args()
-    dataset = Dataset()
-    dataset.gpu = torch.cuda.is_available()
-    dataset.read_config(args.config)
-    if dataset.pretrain_model_dir:
-        # pretrainを行ったdsetを読み込み、AlphabetをPretrainにする。
-        lm_dset = Dataset()
-        lm_dset.load(f"{dataset.pretrain_model_dir}.dset")
-        dataset.load_lm_dset_alphabets(lm_dset)
-        print("===============================")
-        dataset.describe()
-    else:
-        data_initialization(dataset)
-    dataset.generate_instance('train')
-    dataset.generate_instance('dev')
-    dataset.generate_instance('test')
-    #dataset.build_pretrain_emb()
-    dataset.describe()
-    train(dataset)
+        torch.save(seq_model.state_dict(), os.path.join(config_dic.get("ner_model_dir"), f"{config_dic.get('train_name')}.{epoch_i}.model"))
+    
+    torch.save(seq_model.state_dict(), os.path.join(config_dic.get("ner_model_dir"), f"{config_dic.get('train_name')}.model"))

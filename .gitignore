@@ -2,3 +2,5 @@
 *.model
 *.txt
 *.pyc
+
+__pycache__/
