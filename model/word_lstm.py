@@ -1,56 +1,36 @@
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-import numpy as np
 
 from model.charrep import CharRep
 from model.subwordrep import SubwordRep
 
 
 class WordLSTM(nn.Module):
-    def __init__(self, dataset):
+    
+    def __init__(self, config_dic, word_vocab_dim, char_vocab_dim, sw_vocab_dim, pretrain_word_embedding: np.ndarray):
         super().__init__()
-        self.gpu = dataset.gpu
-        self.batch_size = dataset.batch_size
-        self.sw_num = dataset.sw_num
-        self.input_size = dataset.word_emb_dim
-
-        # char
-        self.char_rep = CharRep(dataset.char_alphabet.size(),
-                                dataset.pretrain_char_embedding,
-                                dataset.char_emb_dim,
-                                dataset.char_hidden_dim,
-                                dataset.dropout,
-                                dataset.gpu)
-        self.input_size += dataset.char_hidden_dim
-
-        # subword
-        self.subword_reps = [SubwordRep(
-            alphabet_size=dataset.sw_alphabet_list[i].size(),
-            embedding_dim=dataset.sw_emb_dim,
-            hidden_dim=dataset.sw_hidden_dim,
-            dropout=dataset.dropout,
-            gpu=dataset.gpu) for i in range(self.sw_num)]
-        self.input_size += dataset.sw_hidden_dim * self.sw_num
-        print(self.subword_reps)
-
-        # word
-        self.embedding_dim = dataset.word_emb_dim
-        self.drop = nn.Dropout(dataset.dropout)
-        self.word_embedding = nn.Embedding(dataset.word_alphabet.size(), self.embedding_dim)
-        if dataset.pretrain_word_embedding is not None:
-            self.word_embedding.weight.data.copy_(torch.from_numpy(dataset.pretrain_word_embedding))
+        self.gpu = config_dic.get("gpu")
+        self.char_rep = CharRep(config_dic, char_vocab_dim)
+        self.subword_rep = SubwordRep(config_dic, sw_vocab_dim)
+        self.lstm_input_dim = config_dic.get("word_emb_dim", 50)
+        self.lstm_input_dim += config_dic.get("char_hidden_dim", 50)
+        self.lstm_input_dim += config_dic.get("sw_hidden_dim", 100)
+        self.embedding_dim = config_dic.get("sord_emb_dim", 50)
+        self.drop = nn.Dropout(config_dic.get("dropout", 0.5))
+        self.word_hidden_dim = config_dic.get("word_hidden_dim", 200)
+        self.word_embedding = nn.Embedding(word_vocab_dim, self.embedding_dim)
+        if config_dic.get(pretrain_word_embedding) is not None:
+            self.word_embedding.weight.data.copy_(torch.from_numpy(config_dic.get(pretrain_word_embedding)))
         else:
-            self.word_embedding.weight.data.copy_(torch.from_numpy(self.random_embedding(dataset.word_alphabet.size(), self.embedding_dim)))
-        self.droplstm = nn.Dropout(dataset.dropout)
-        lstm_hidden = dataset.hidden_dim // 2
-        self.lstm = nn.LSTM(self.input_size, lstm_hidden, num_layers=1, batch_first=True, bidirectional=True)
+            self.word_embedding.weight.data.copy_(torch.from_numpy(self.random_embedding(word_vocab_dim, self.embedding_dim)))
+        self.lstm = nn.LSTM(self.lstm_input_dim, self.word_hidden_dim // 2, batch_first=True, bidirectional=True)
 
         if self.gpu:
             self.drop.cuda()
             self.word_embedding.cuda()
-            self.droplstm.cuda()
             self.lstm.cuda()
 
     def random_embedding(self, vocab_size, embedding_dim):
@@ -61,32 +41,27 @@ class WordLSTM(nn.Module):
         return pretrain_emb
 
 
-    def forward(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover , sw_inputs, sw_seqs_lengths, sw_seqs_recover, sw_fmasks, sw_bmasks):
-        batch_size = word_inputs.size(0)
-        sent_len = word_inputs.size(1)
-        word_embs =  self.word_embedding(word_inputs)
-        word_list = [word_embs]
+    def forward(self, word_features, char_features, sw_features):
+        word_ids = word_features.get("word_ids")
+        batch_size, sent_len = word_ids.shape
+        
+        char_rep = self.char_rep.get_last_hiddens(char_features)
+        sw_rep, sw_sorted_lengths = self.subword_rep.get_masked_hidden(sw_features)
 
-        ### Char ###
-        char_rep = self.char_rep.get_last_hiddens(char_inputs, char_seq_lengths.cpu().numpy())
-        char_rep = char_rep[char_seq_recover]
-        char_rep = char_rep.view(batch_size, sent_len, -1)
-        word_list.append(char_rep)
-        #word_embs = torch.cat([word_embs, char_rep], 2)
+        lengths = word_ids.eq(0).lt(1).sum(dim=1)
+        word_sorted_lengths, word_perm_ix = lengths.sort(descending=True)
+        assert all(sw_sorted_lengths == word_sorted_lengths),  \
+            "Not Equal sw_sorted_lenghts, word_sorted_lengths"
 
-        ### SubWord ###
-        for idx in range(self.sw_num):
-            sw_rep = self.subword_reps[idx].get_masked_hidden(sw_inputs[idx], sw_seqs_lengths[idx].cpu().numpy(), sw_fmasks[idx], sw_bmasks[idx], int(word_embs.shape[1]))
-            sw_rep = sw_rep[sw_seqs_recover[idx]]
-            word_list.append(sw_rep)
-    
-        word_embs = torch.cat(word_list, 2)
-        word_represent = self.drop(word_embs)
+        word_embs =  self.word_embedding(word_ids)
+        word_rep = torch.cat([word_embs[word_perm_ix], char_rep[word_perm_ix], sw_rep], 2)  # sw_repはsort済み
 
         ### Word LSTM ###
-        packed_words = pack_padded_sequence(word_represent, word_seq_lengths.cpu().numpy(), True)
+        packed_words = pack_padded_sequence(word_rep, word_sorted_lengths, True)
         hidden = None
         lstm_out, hidden = self.lstm(packed_words, hidden)
         lstm_out, _ = pad_packed_sequence(lstm_out)  # (seq_len, seq_len, hidden_size)
-        lstm_out = self.droplstm(lstm_out.transpose(1, 0))  # (batch_size, seq_len, hidden_size)
-        return lstm_out
+        lstm_out = self.drop(lstm_out.transpose(1, 0))  # (batch_size, seq_len, hidden_size)
+
+        _, recover_parm_ix = word_perm_ix.sort()
+        return lstm_out[recover_parm_ix]

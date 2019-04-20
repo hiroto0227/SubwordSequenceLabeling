@@ -1,33 +1,24 @@
-# -*- coding: utf-8 -*-
-# @Author: Jie Yang
-# @Date:   2017-10-17 16:47:32
-# @Last Modified by:   Jie Yang,     Contact: jieynlp@gmail.com
-# @Last Modified time: 2018-10-18 11:19:37
-from __future__ import print_function
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-import numpy as np
+
 
 class CharRep(nn.Module):
-    def __init__(self, alphabet_size, pretrain_char_embedding, embedding_dim, hidden_dim, dropout, gpu, bidirect_flag = True):
-        super(CharRep, self).__init__()
-        self.gpu = gpu
-        self.hidden_dim = hidden_dim
-        if bidirect_flag:
-            self.hidden_dim = hidden_dim // 2
-        self.char_drop = nn.Dropout(dropout)
-        self.char_embeddings = nn.Embedding(alphabet_size, embedding_dim)
-        if pretrain_char_embedding is not None:
-            self.char_embeddings.weight.data.copy_(torch.from_numpy(pretrain_char_embedding))
-        else:
-            self.char_embeddings.weight.data.copy_(torch.from_numpy(self.random_embedding(alphabet_size, embedding_dim)))
-        self.char_lstm = nn.LSTM(embedding_dim, self.hidden_dim, num_layers=1, batch_first=True, bidirectional=bidirect_flag)
+    
+    def __init__(self, config_dic, char_vocab_dim):
+        super().__init__()
+        self.gpu = config_dic.get("gpu")
+        self.char_emb_dim = config_dic.get("char_emb_dim", 30)
+        self.char_hidden_dim = config_dic.get("char_hidden_dim", 100)# bidirectional
+        self.dropout = nn.Dropout(config_dic.get("dropout", 0.5))
+        self.char_embeddings = nn.Embedding(char_vocab_dim, self.char_emb_dim)
+        self.char_embeddings.weight.data.copy_(torch.from_numpy(self.random_embedding(char_vocab_dim, self.char_emb_dim)))
+        self.char_lstm = nn.LSTM(self.char_emb_dim, self.char_hidden_dim // 2, batch_first=True, bidirectional=True)
         if self.gpu:
-            self.char_drop = self.char_drop.cuda()
-            self.char_embeddings = self.char_embeddings.cuda()
-            self.char_lstm = self.char_lstm.cuda()
-
+            self.dropout.cuda()
+            self.char_embeddings.cuda()
+            self.char_lstm.cuda()
 
     def random_embedding(self, vocab_size, embedding_dim):
         pretrain_emb = np.empty([vocab_size, embedding_dim])
@@ -36,8 +27,7 @@ class CharRep(nn.Module):
             pretrain_emb[index,:] = np.random.uniform(-scale, scale, [1, embedding_dim])
         return pretrain_emb
 
-
-    def get_last_hiddens(self, input, seq_lengths):
+    def get_last_hiddens(self, char_features):
         """
             input:
                 input: Variable(batch_size, word_length)
@@ -46,33 +36,22 @@ class CharRep(nn.Module):
                 Variable(batch_size, char_hidden_dim)
             Note it only accepts ordered (length) variable, length size is recorded in seq_lengths
         """
-        batch_size = input.size(0)
-        char_embeds = self.char_drop(self.char_embeddings(input))
+        char_ids = char_features.get("char_ids")
+        batch_size, seq_length, char_seq_length = char_ids.shape
+
+        char_ids = char_ids.view(-1, char_seq_length)
+        lengths = char_ids.eq(0).lt(1).sum(dim=1)
+
+        char_embeds = self.dropout(self.char_embeddings(char_ids))  # B x L x L_c x Emb
         char_hidden = None
-        pack_input = pack_padded_sequence(char_embeds, seq_lengths, True)
-        char_rnn_out, char_hidden = self.char_lstm(pack_input, char_hidden)
-        ## char_hidden = (h_t, c_t)
-        #  char_hidden[0] = h_t = (2, batch_size, lstm_dimension)
-        # char_rnn_out, _ = pad_packed_sequence(char_rnn_out)
-        return char_hidden[0].transpose(1,0).contiguous().view(batch_size,-1)
+        char_rnn_out, char_hidden = self.char_lstm(char_embeds, char_hidden)
 
-    def get_all_hiddens(self, input, seq_lengths):
-        """
-            input:
-                input: Variable(batch_size,  word_length)
-                seq_lengths: numpy array (batch_size,  1)
-            output:
-                Variable(batch_size, word_length, char_hidden_dim)
-            Note it only accepts ordered (length) variable, length size is recorded in seq_lengths
-        """
-        batch_size = input.size(0)
-        char_embeds = self.char_drop(self.char_embeddings(input))
-        char_hidden = None
-        pack_input = pack_padded_sequence(char_embeds, seq_lengths, True)
-        char_rnn_out, char_hidden = self.char_lstm(pack_input, char_hidden)
-        char_rnn_out, _ = pad_packed_sequence(char_rnn_out)
-        return char_rnn_out.transpose(1,0)
-
-
-    def forward(self, input, seq_lengths):
-        return self.get_all_hiddens(input, seq_lengths)
+        out = torch.zeros((batch_size * seq_length, self.char_hidden_dim), dtype=torch.float)
+        for i in range(batch_size * seq_length):
+            out[i, :self.char_hidden_dim // 2] = char_rnn_out[i, lengths[i] - 1, :self.char_hidden_dim // 2]  # get last value on forward
+            out[i, self.char_hidden_dim // 2:] = char_rnn_out[i, 0, self.char_hidden_dim // 2:]  # get first value on backward
+        
+        if self.gpu:
+            return out.view(batch_size, seq_length, -1).cuda()
+        else:
+            return out.view(batch_size, seq_length, -1)
