@@ -19,7 +19,7 @@ class ChemSentencePiece:
 
     @classmethod    
     def train(self, corpus_path: str, vocab_size: int):
-        spm.SentencePieceTrainer.Train("--normalization_rule_name=identity --input={} --model_prefix=sp{}  --vocab_size={}  --model_type=unigram".format(corpus_path, vocab_size, vocab_size))
+        spm.SentencePieceTrainer.Train("--normalization_rule_name=identity --input={} --model_prefix=sp{}  --vocab_size={}  --model_type=unigram --mining_sentence_size=1000000".format(corpus_path, vocab_size, vocab_size))
         shutil.move(f"sp{vocab_size}.model", os.path.join(self.SP_DIR, f"sp{vocab_size}.model"))
         shutil.move(f"sp{vocab_size}.vocab", os.path.join(self.SP_DIR, f"sp{vocab_size}.vocab"))
         os.remove(f"sp{vocab_size}.model")

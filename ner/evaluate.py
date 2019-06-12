@@ -120,6 +120,8 @@ def get_result(correct_chunks, true_chunks, pred_chunks, correct_counts, true_co
     sum_correct_counts = sum(correct_counts.values())
     sum_true_counts = sum(true_counts.values())
     
+    print(f"True: {sum_true_chunks}, Correct: {sum_correct_chunks}, Pred: {sum_pred_chunks}")
+    
     precision = sum_correct_chunks / sum_pred_chunks if sum_pred_chunks else 0
     recall = sum_correct_chunks / sum_true_chunks if sum_true_chunks else 0
     fscore = 2 * precision * recall / (precision + recall) if precision + recall else 0

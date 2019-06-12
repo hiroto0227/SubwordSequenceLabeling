@@ -1,4 +1,5 @@
 START = "</s>"
+END = "</end>"
 UNKNOWN = "</unk>"
 PADDING = "</pad>"
 NUM = "<num>"

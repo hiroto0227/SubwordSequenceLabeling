@@ -5,12 +5,12 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_se
 
 
 class SubwordRep(nn.Module):
-    def __init__(self, config_dic, sw_vocab_dim):
+    def __init__(self, config_dic, sw_vocab_dim, dropout_rate: float):
         super().__init__()
         self.gpu = config_dic.get("gpu", False)
-        self.sw_emb_dim = config_dic.get("sw_emb_dim", 50)
-        self.sw_hidden_dim = config_dic.get("sw_hidden_dim", 100)
-        self.dropout = nn.Dropout(config_dic.get("dropout", 0.5))
+        self.sw_emb_dim = config_dic.get("sw_emb_dim")
+        self.sw_hidden_dim = config_dic.get("sw_hidden_dim")
+        self.dropout = nn.Dropout(dropout_rate)
         self.embeddings = nn.Embedding(sw_vocab_dim, self.sw_emb_dim)
         self.embeddings.weight.data.copy_(torch.from_numpy(self.random_embedding(sw_vocab_dim, self.sw_emb_dim)))
         self.lstm = nn.LSTM(self.sw_emb_dim, self.sw_hidden_dim // 2, num_layers=1, batch_first=True, bidirectional=True)
@@ -43,13 +43,13 @@ class SubwordRep(nn.Module):
         lstm_out, sorted_lengths = pad_packed_sequence(lstm_out, batch_first=True)
 
         # mask process
-        fmasks = sw_features.get("fmasks")[perm_ix]
+        fmasks = sw_features.get("fmasks")[perm_ix] # (B, L_sw)
         bmasks = sw_features.get("bmasks")[perm_ix]
         out_seq_lengths = fmasks.sum(dim=1) # sw_lengths順でのperm後のfmaskした後の単語レベルの長さ(bmaskの場合でも同じ)
         fmasks = fmasks.unsqueeze(2).expand(batch_size, sw_seq_length, self.sw_hidden_dim // 2).byte()  # fmaskをsw_hidden_dimに引き延ばす。
         bmasks = bmasks.unsqueeze(2).expand(batch_size, sw_seq_length, self.sw_hidden_dim // 2).byte()  # bmaskをsw_hidden_dimに引き延ばす。
 
-        f_lstm_out = lstm_out[:, :, :self.sw_hidden_dim // 2]
+        f_lstm_out = lstm_out[:, :, :self.sw_hidden_dim // 2] # (B, L_sw, Ec // 2)
         b_lstm_out = lstm_out[:, :, self.sw_hidden_dim // 2:]
 
         f_out, b_out = [], []
@@ -59,5 +59,6 @@ class SubwordRep(nn.Module):
         f_padded_out = pad_sequence(f_out, batch_first=True)
         b_padded_out = pad_sequence(b_out, batch_first=True)
 
+        # マスクした後のword_lengthでの並び順を直す。(sw lengthとword lengthの順番が一致しないことがある。)
         out_sorted_lengths, out_perm_ix = out_seq_lengths.sort(descending=True)  # forward, backward 共通
         return torch.cat([f_padded_out[out_perm_ix], b_padded_out[out_perm_ix]], dim=2), out_sorted_lengths
