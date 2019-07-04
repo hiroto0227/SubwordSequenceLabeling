@@ -17,12 +17,14 @@ from tqdm import tqdm
 
 sys.path.append("./")
 from chem_sentencepiece.chem_sentencepiece import ChemSentencePiece
+from chem_sentencepiece.char_tokenizer import CharTokenizer
 from config import config_dics
 from label import UNKNOWN, PADDING, NUM, START, END
 from utils import load_pretrain_embeddings, build_pretrain_embeddings, normalize_number_word
 from model.seqmodel import SeqModel
 from ner.evaluate import evaluate
 from preprocess import get_char_features, get_sw_features, get_word_features, get_label_features
+from trainer.opt import NoamOpt
 
 seed_num = 42
 random.seed(seed_num)
@@ -89,58 +91,56 @@ if __name__ == "__main__":
     pprint.pprint(config_dic)
 
     # load sentence piece
-    if config_dic.get("sp_path"):
-        sp = ChemSentencePiece()
-        sp.load(config_dic.get("sp_path"))
-    else:
-        sp = None
-
+    sps: dict = {"Char": CharTokenizer()}
+    for sp_key, sp_path in config_dic["sp_path"].items():
+        sps[sp_key] = ChemSentencePiece.load(sp_path)
+    
     # load train data
     print("=========== Load train data ===========")
     train_word_documents, train_label_documents = load_seq_data(os.path.join(config_dic.get("ner_input_dir"), "train.bioes"), config_dic.get("number_normalize"))
     valid_word_documents, valid_label_documents = load_seq_data(os.path.join(config_dic.get("ner_input_dir"), "valid.bioes"), config_dic.get("number_normalize"))
     test_word_documents, test_label_documents = load_seq_data(os.path.join(config_dic.get("ner_input_dir"), "test.bioes"), config_dic.get("number_normalize"))
-    
-    train_char_documents = [[[char for char in word] for word in document] for document in train_word_documents] # Document数 x 文字数
-    valid_char_documents = [[[char for char in word] for word in document] for document in valid_word_documents]
-    test_char_documents = [[[char for char in word] for word in document] for document in test_word_documents]
 
-    if sp:
-        train_sw_documents = get_sw_documents(train_word_documents, sp)
-        valid_sw_documents = get_sw_documents(valid_word_documents, sp)
-        test_sw_documents = get_sw_documents(test_word_documents, sp)
-    else:
-        train_sw_documents, valid_sw_documents, test_sw_documents = None, None, None
+    # train_char_documents = [[[char for char in word] for word in document] for document in train_word_documents] # Document数 x 文字数
+    # valid_char_documents = [[[char for char in word] for word in document] for document in valid_word_documents]
+    # test_char_documents = [[[char for char in word] for word in document] for document in test_word_documents]
+
+    train_sw_documents_dicts = {}
+    valid_sw_documents_dicts = {}
+    test_sw_documents_dicts = {}
+    for sp_key, sp in sps.items():
+        train_sw_documents_dicts[sp_key] = get_sw_documents(train_word_documents, sp)
+        valid_sw_documents_dicts[sp_key] = get_sw_documents(valid_word_documents, sp)
+        test_sw_documents_dicts[sp_key] = get_sw_documents(test_word_documents, sp)
 
     # load vocabulary
     print("=========== Build vocabulary ===========")
     if os.path.exists(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.word.dic")):
         word_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.word.dic"))
-        char_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.char.dic"))
-        if sp:
-            sw_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.sw.dic"))
-        else:
-            sw_dic = None
+        #char_dic = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.char.dic"))
+        sw_dicts = {}
+        for sp_key, sp in sps.items():
+            sw_dicts[sp_key] = Dictionary.load(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.{sp_key}.dic"))
     else:
         special_token_dict = {PADDING: 0, UNKNOWN: 1, START: 2, END: 3}
         word_dic = Dictionary()
         word_dic.token2id = special_token_dict
-        char_dic = Dictionary()
-        char_dic.token2id = special_token_dict
-        if sp:
-            sw_dic = Dictionary()
-            sw_dic.token2id = special_token_dict
-        else:
-            sw_dic = None
+        #char_dic = Dictionary()
+        #char_dic.token2id = special_token_dict
+        sw_dicts = {}
+        for sp_key, sp in sps.items():
+            _dic = Dictionary()
+            _dic.token2id = special_token_dict
+            sw_dicts[sp_key] = _dic
     label_dic = Dictionary(train_label_documents)
     label_dic.patch_with_special_tokens({PADDING: 0})
     label_dic.id2token = {_id: label for label, _id in label_dic.token2id.items()}
 
     # add vocabulary
     word_dic.add_documents(train_word_documents)
-    char_dic.add_documents(list(chain.from_iterable(train_char_documents)))
-    if sp:
-        sw_dic.add_documents(train_sw_documents)
+    #char_dic.add_documents(list(chain.from_iterable(train_char_documents)))
+    for sp_key, train_sw_documents in train_sw_documents_dicts.items():
+        sw_dicts[sp_key].add_documents(train_sw_documents)
 
     # load GloVe
     if config_dic.get("glove_path"):
@@ -157,11 +157,16 @@ if __name__ == "__main__":
     else:
         config_dic["gpu"] = False
   
-    if sw_dic:
-        seq_model = SeqModel(config_dic, len(word_dic.token2id), len(char_dic.token2id), len(sw_dic.token2id), len(label_dic.token2id), pretrain_embeddings)
-    else:
-        seq_model = SeqModel(config_dic, len(word_dic.token2id), len(char_dic.token2id), None, len(label_dic.token2id), pretrain_embeddings)
-    
+
+    seq_model = SeqModel(
+        config_dic, 
+        len(word_dic.token2id), 
+        None, 
+        [len(sw_dic.token2id) for sw_dic in sw_dicts.values()], 
+        len(label_dic.token2id), 
+        pretrain_embeddings
+    )
+
     # load pretrained language model
     if config_dic.get("lm_model_dir"):
        lm_state_dict = torch.load(os.path.join(config_dic.get("lm_model_dir"), f"{args.config}.model"))
@@ -169,15 +174,20 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.SGD(seq_model.parameters(), lr=config_dic.get("ner_lr"), weight_decay=config_dic.get("weight_decay"))
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.99)
+    # def get_std_opt(model):
+    #     return NoamOpt(50, 25, 100000,
+    #             torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+    # lr_scheduler = get_std_opt(seq_model)
     
     print(seq_model)
-    print(lr_scheduler.state_dict())
+    print(optimizer)
 
     ## start training
     epoch = config_dic.get("ner_epoch")
     for epoch_i in range(epoch):
         print("Epoch: %s/%s" %(epoch_i, epoch))
         lr_scheduler.step()
+        #print(f"Learning Rate: {lr_scheduler.rate()}")
         print(f"Learning Rate: {lr_scheduler.get_lr()}")
 
         random_ids = list(range(len(train_word_documents)))
@@ -191,33 +201,23 @@ if __name__ == "__main__":
         seq_model.zero_grad()
         optimizer.zero_grad()
 
-        # # LangageModelを使用した時に重みを固定する。
-        # if epoch_i < 1 and config_dic.get("lm_model_dir"):
-        #     print("=========== seq_model.word_lstm.eval() ============")
-        #     seq_model.word_lstm.eval()
-        #     for param in seq_model.word_lstm.parameters():
-        #         param.requires_grad = False
-
         for batch_i in tqdm(range(batch_steps)):
+            #lr_scheduler.step()
             start_time = time.time()
             batch_ids = random_ids[batch_i * batch_size: (batch_i + 1) * batch_size]
             batch_word_documents = [train_word_documents[i] for i in batch_ids]
             batch_label_documents = [train_label_documents[i] for i in batch_ids]
             word_features = get_word_features(batch_word_documents, word_dic, config_dic.get("gpu"))
-            # print(word_features.get("word_ids").shape)
-            char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
-            if sp:
-                sw_features = get_sw_features(batch_word_documents, sw_dic, sp, config_dic.get("gpu"))
-            else:
-                sw_features = None
+            #char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
+            sw_features_list = []
+            for sp_key, sp in sps.items():
+                sw_features_list.append(get_sw_features(batch_word_documents, sw_dicts[sp_key], sp, config_dic.get("gpu")))
             label_features = get_label_features(batch_label_documents, label_dic, config_dic.get("gpu"))
-            loss, train_tag_seq = seq_model.neg_log_likelihood_loss(word_features, char_features, sw_features, label_features)
+            loss, train_tag_seq = seq_model.neg_log_likelihood_loss(word_features, None, sw_features_list, label_features)
             batch_ave_loss += loss.data
             total_loss += loss.data
             loss.backward()
 
-            # if config_dic.get("grad_clip"):
-            #     torch.nn.utils.clip_grad_norm_(seq_model.parameters(), max_norm=config_dic.get("grad_clip")) # モデルの重みをclipする。
             optimizer.step()
             seq_model.zero_grad()
 
@@ -246,13 +246,12 @@ if __name__ == "__main__":
             batch_label_documents = [valid_label_documents[i] for i in batch_ids]
 
             valid_word_features = get_word_features(batch_word_documents, word_dic, config_dic.get("gpu"))
-            valid_char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
-            if sp:
-                valid_sw_features = get_sw_features(batch_word_documents, sw_dic, sp, config_dic.get("gpu"))
-            else:
-                 valid_sw_features = None
+            #valid_char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
+            valid_sw_features_list = []
+            for sp_key, sp in sps.items():
+                valid_sw_features_list.append(get_sw_features(batch_word_documents, sw_dicts[sp_key], sp, config_dic.get("gpu")))
             valid_label_features = get_label_features(batch_label_documents, label_dic, config_dic.get("gpu"))
-            valid_tag_seq = seq_model.forward(valid_word_features, valid_char_features, valid_sw_features)
+            valid_tag_seq = seq_model.forward(valid_word_features, None, valid_sw_features_list)
             masks = valid_word_features.get("masks")
             rt, tt = predict_check(valid_tag_seq, valid_label_features.get("label_ids"), masks)
             right_token += rt
@@ -277,13 +276,12 @@ if __name__ == "__main__":
             batch_label_documents = [test_label_documents[i] for i in batch_ids]
 
             test_word_features = get_word_features(batch_word_documents, word_dic, config_dic.get("gpu"))
-            test_char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
-            if sp:
-                test_sw_features = get_sw_features(batch_word_documents, sw_dic, sp, config_dic.get("gpu"))
-            else:
-                 test_sw_features = None
+            #test_char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
+            test_sw_features_list = []
+            for sp_key, sp in sps.items():
+                test_sw_features_list.append(get_sw_features(batch_word_documents, sw_dicts[sp_key], sp, config_dic.get("gpu")))
             test_label_features = get_label_features(batch_label_documents, label_dic, config_dic.get("gpu"))
-            test_tag_seq = seq_model.forward(test_word_features, test_char_features, test_sw_features)
+            test_tag_seq = seq_model.forward(test_word_features, None, test_sw_features_list)
             rt, tt = predict_check(test_tag_seq, test_label_features.get("label_ids"), test_word_features.get("masks"))
             right_token += rt
             total_token += tt

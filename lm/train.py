@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 import gc
 from itertools import chain
 import os
@@ -17,6 +18,7 @@ from tqdm import tqdm
 
 sys.path.append("./")
 from chem_sentencepiece.chem_sentencepiece import ChemSentencePiece
+from chem_sentencepiece.char_tokenizer import CharTokenizer
 from config import config_dics
 from label import UNKNOWN, PADDING, NUM, START, END
 from utils import tokenize, normalize_number_word, load_pretrain_embeddings,build_pretrain_embeddings
@@ -59,20 +61,20 @@ def load_lm_documents(lm_input_path: str, number_normalize: bool) -> List[List[s
                     word_documents.append(word_document)
     return word_documents
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str)
     args = parser.parse_args()
 
+    print(datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
     config_dic = config_dics[args.config]
     pprint.pprint(config_dic)
 
     # load sentence piece
-    if config_dic.get("sp_path"):
-        sp = ChemSentencePiece()
-        sp.load(config_dic.get("sp_path"))
-    else:
-        sp = None
+    sps: dict = {"Char": CharTokenizer()}
+    for sp_key, sp_path in config_dic["sp_path"].items():
+        sps[sp_key] = ChemSentencePiece.load(sp_path)
 
     # load train data
     print("=========== Load train data ===========")
@@ -88,42 +90,48 @@ if __name__ == "__main__":
         with open(os.path.join(config_dic.get("cache_dir"), lm_corpus_name + ".word_documents"), "wb") as f:
             f.write(cloudpickle.dumps(word_documents))
 
-    if sp:
-        print("=========== Split Subword ==============")
-        if os.path.exists(os.path.join(config_dic.get('cache_dir'), lm_corpus_name + '.sw_documents')):
-            print(f"Use Cache data. {os.path.join(config_dic.get('cache_dir'), lm_corpus_name + '.sw_documents')}")
-            with open(os.path.join(config_dic.get("cache_dir"), lm_corpus_name + ".sw_documents"), "rb") as f:
-                sw_documents = cloudpickle.loads(f.read())
+    sw_documents_dict = {}
+    for sp_key, sp in sps.items():
+        sp_cache_path = os.path.join(config_dic.get('cache_dir'), lm_corpus_name + f'.{sp_key}_documents')
+        print(f"=========== Split Subword {sp_key} ==============")
+        if os.path.exists(sp_cache_path):
+            print(f"Use Cache data. {sp_cache_path}")
+            with open(sp_cache_path, "rb") as f:
+                sw_documents_dict[sp_key] = cloudpickle.loads(f.read())
         else:
             sw_documents = []
             for word_document in tqdm(word_documents):
                 sws = [sp.tokenize(word) for word in word_document]
                 sw_documents.append(list(chain.from_iterable(sws)))
-        if os.path.exists(config_dic.get("cache_dir")) and not os.path.exists(os.path.join(config_dic.get("cache_dir"), lm_corpus_name + ".sw_documents")):
-            print(f"Write Cache data. {os.path.join(config_dic.get('cache_dir'), lm_corpus_name + '.sw_documents')}")
-            with open(os.path.join(config_dic.get("cache_dir"), lm_corpus_name + ".sw_documents"), "wb") as f:
-                f.write(cloudpickle.dumps(sw_documents))
+            sw_documents_dict[sp_key] = sw_documents
+            
+            if os.path.exists(config_dic.get("cache_dir")) and not os.path.exists(sp_cache_path):
+                print(f"Write Cache data. {sp_cache_path}")
+                with open(sp_cache_path, "wb") as f:
+                    f.write(cloudpickle.dumps(sw_documents))
     
     print("=========== Build vocabulary ===========")
     special_token_dict = {PADDING: 0, UNKNOWN: 1, START: 2, END: 3}
     word_dic = Dictionary(word_documents)
     word_dic.filter_extremes(no_below=5, no_above=1.0, keep_n=None)
     word_dic.patch_with_special_tokens(special_token_dict)
-    if sp:
+    
+    sw_dicts = {}
+    for sp_key, sw_documents in sw_documents_dict.items():
         sw_dic = Dictionary(sw_documents)
         sw_dic.filter_extremes(no_below=5, no_above=1.0, keep_n=None)
         sw_dic.patch_with_special_tokens(special_token_dict)
-    else:
-        sw_dic = None
+        sw_dicts[sp_key] = sw_dic
 
-    char_dic = Dictionary([[char for word in word_document for char in word] for word_document in word_documents])
-    char_dic.filter_extremes(no_below=5, no_above=1.0, keep_n=None)
-    char_dic.patch_with_special_tokens(special_token_dict)
+    # char_dic = Dictionary([[char for word in word_document for char in word] for word_document in word_documents])
+    # char_dic.filter_extremes(no_below=5, no_above=1.0, keep_n=None)
+    # char_dic.patch_with_special_tokens(special_token_dict)
 
+    print("============= Save Vocabulary ================")
     word_dic.save(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.word.dic"))
-    char_dic.save(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.char.dic"))
-    if sw_dic:
-        sw_dic.save(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.sw.dic"))
+    #char_dic.save(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.char.dic"))
+    for sw_key, sw_dic in sw_dicts.items():
+        sw_dic.save(os.path.join(config_dic.get("vocab_dir"), f"{args.config}.{sw_key}.dic"))
 
     # load GloVe
     if config_dic.get("glove_path"):
@@ -140,15 +148,19 @@ if __name__ == "__main__":
     else:
         config_dic["gpu"] = False
 
-    if sw_dic:
-        model = LanguageModel(config_dic, len(word_dic.token2id), len(char_dic.token2id), len(sw_dic.token2id), pretrain_embeddings)
-    else:
-        model = LanguageModel(config_dic, len(word_dic.token2id), len(char_dic.token2id), None, pretrain_embeddings)
+    print([len(sw_dic.token2id) for _, sw_dic in sw_dicts.items()])
+    model = LanguageModel(
+        config_dic, 
+        len(word_dic.token2id), 
+        None, 
+        [len(sw_dic.token2id) for _, sw_dic in sw_dicts.items()],
+        pretrain_embeddings)
     optimizer = torch.optim.SGD(model.parameters(), lr=config_dic.get("lm_lr"), weight_decay=config_dic.get("weight_decay"))
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.95)
     criterion = torch.nn.NLLLoss(size_average=True, ignore_index=word_dic.token2id.get(PADDING))
 
     print(model)
+    print(optimizer)
     print(lr_scheduler.state_dict())
 
     save_model_path = os.path.join(config_dic.get("lm_model_dir"), f"{args.config}.model")
@@ -172,13 +184,11 @@ if __name__ == "__main__":
             model.zero_grad()
             batch_word_documents = word_documents[batch_i * batch_size: (batch_i + 1) * batch_size]
             word_features = get_word_features(batch_word_documents, word_dic, config_dic.get("gpu"))
-            char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
-            if sp:
-                sw_features = get_sw_features(batch_word_documents, sw_dic, sp, config_dic.get("gpu"))
-            else:
-                sw_features = None
-            #print(f"word_shape: {word_features.get('word_ids').shape}")
-            forward_out, backward_out = model.calc_next_word_id_prob(word_features, char_features, sw_features)
+            #char_features = get_char_features(batch_word_documents, char_dic, config_dic.get("gpu"))
+            sw_features_list = []
+            for sp_key, sp in sps.items():
+                sw_features_list.append(get_sw_features(batch_word_documents, sw_dicts[sp_key], sp, config_dic.get("gpu")))
+            forward_out, backward_out = model.calc_next_word_id_prob(word_features, None, sw_features_list)
             #### loss_function ###
             batch_word = word_features.get("word_ids")
             if config_dic.get("gpu"):

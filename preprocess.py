@@ -71,19 +71,7 @@ def get_label_features(label_documents: List[List[str]], label_dic: Dictionary, 
     else:
         return {"label_ids": padded_tensor}
 
-
 def get_fmasks(sw_documents):
-    f_masks = []
-    for sw_document in sw_documents:
-        f_mask = [0 for i in range(len(sw_document))]
-        for i, sw in enumerate(sw_document):
-            if sw.startswith("▁"):
-                f_mask[i] = 1
-        f_masks.append(f_mask)
-    return f_masks
-
-
-def get_bmasks(sw_documents):
     b_masks = []
     for sw_document in sw_documents:
         is_pre_first = True
@@ -94,3 +82,14 @@ def get_bmasks(sw_documents):
             is_pre_first = sw.startswith("▁")
         b_masks.append(b_mask[::-1])
     return b_masks
+
+def get_bmasks(sw_documents):
+    f_masks = []
+    for sw_document in sw_documents:
+        f_mask = [0 for i in range(len(sw_document))]
+        for i, sw in enumerate(sw_document):
+            if sw.startswith("▁"):
+                f_mask[i] = 1
+        f_masks.append(f_mask)
+    return f_masks
+

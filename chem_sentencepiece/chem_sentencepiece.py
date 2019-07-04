@@ -8,14 +8,17 @@ import sentencepiece as spm
 
 
 class ChemSentencePiece:
-    spe: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
-
-    def __init__(self):
-        pass
+    def __init__(self, spe: spm.SentencePieceProcessor):
+        if spe:
+            self.spe = spe
+        else:
+            self.spe = spm.SentencePieceProcessor()
 
     @classmethod
     def load(self, sp_path: str):
-        self.spe.Load(sp_path)
+        spe = spm.SentencePieceProcessor()
+        spe.Load(sp_path)
+        return ChemSentencePiece(spe)
 
     @classmethod    
     def train(self, corpus_path: str, vocab_size: int):

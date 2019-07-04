@@ -6,11 +6,22 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from model.charrep import CharRep
+from model.modality_attention import ModalityAttention
 from model.subwordrep import SubwordRep
 
 
+class SelfAttention(nn.Module):
+    def __init__(self):
+        self.query_linear = nn.Linear()
+        self.value_linear = nn.Linear()
+        self.key_linear = nn.Linear()
+        self.output_linear = nn.Linear()
+
+    def forward(self):
+        raise NotImplementedError()
+
+
 class WordLSTM(nn.Module):
-    
     def __init__(
         self: nn.Module, 
         config_dic: dict, 
@@ -18,17 +29,18 @@ class WordLSTM(nn.Module):
         char_vocab_dim: int, 
         sw_vocab_dim_list: List[int], 
         pretrain_word_embedding: np.ndarray, 
+        use_modality_attention: bool,
         dropout_rate: float
     ):
         super().__init__()
         self.gpu = config_dic.get("gpu")
         self.use_sw = False
-        self.char_rep = CharRep(config_dic, char_vocab_dim, dropout_rate)
+        #self.char_rep = CharRep(config_dic, char_vocab_dim, dropout_rate)
         self.lstm_input_dim = config_dic.get("word_emb_dim")
-        self.lstm_input_dim += config_dic.get("char_hidden_dim")
+        #self.lstm_input_dim += config_dic.get("char_hidden_dim")
         self.subword_rep_list = nn.ModuleList()
+        self.use_modality_attention = use_modality_attention
         for sw_vocab_dim in sw_vocab_dim_list:
-            print(sw_vocab_dim)
             self.use_sw = True
             self.subword_rep_list.append(SubwordRep(config_dic, sw_vocab_dim, dropout_rate))
             self.lstm_input_dim += config_dic.get("sw_hidden_dim")
@@ -40,11 +52,18 @@ class WordLSTM(nn.Module):
             self.word_embedding.weight.data.copy_(torch.from_numpy(pretrain_word_embedding))
         else:
             self.word_embedding.weight.data.copy_(torch.from_numpy(self.random_embedding(word_vocab_dim, self.embedding_dim)))
-        self.lstm = nn.LSTM(self.lstm_input_dim, self.word_hidden_dim // 2, batch_first=True, bidirectional=True)
+        
+        if self.use_modality_attention:
+            self.modality_att= ModalityAttention(modality_num=1+len(self.subword_rep_list), embedding_size=self.embedding_dim, dropout=dropout_rate)
+            self.lstm = nn.LSTM(self.embedding_dim, self.word_hidden_dim // 2, batch_first=True, bidirectional=True)
+        else:
+            self.lstm = nn.LSTM(self.lstm_input_dim, self.word_hidden_dim // 2, batch_first=True, bidirectional=True)
 
         if self.gpu:
             self.dropout.cuda()
             self.word_embedding.cuda()
+            if self.use_modality_attention:
+                self.modality_att.cuda()
             self.lstm.cuda()
 
     def random_embedding(self, vocab_size, embedding_dim):
@@ -59,14 +78,13 @@ class WordLSTM(nn.Module):
         batch_size, sent_len = word_ids.shape
         word_lstm_input = []
         
-        char_rep = self.char_rep.get_last_hiddens(char_features)
-        
+        #char_rep = self.char_rep.get_last_hiddens(char_features)
         
         lengths = word_ids.eq(0).lt(1).sum(dim=1)
         word_sorted_lengths, word_perm_ix = lengths.sort(descending=True)
         word_embs =  self.word_embedding(word_ids)
 
-        word_lstm_input.append(char_rep[word_perm_ix])
+        #word_lstm_input.append(char_rep[word_perm_ix])
         word_lstm_input.append(word_embs[word_perm_ix])
 
         for i, sw_features in enumerate(sw_features_list):
@@ -76,6 +94,8 @@ class WordLSTM(nn.Module):
             word_lstm_input.append(sw_rep)
         
         word_rep = torch.cat(word_lstm_input, 2)  # sw_repはsort済み
+        if self.use_modality_attention:
+            word_rep = self.modality_att(word_rep)
         
         ### Word LSTM ###
         word_rep = self.dropout(word_rep)

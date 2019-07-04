@@ -6,7 +6,7 @@ import sys
 from tqdm import tqdm
 
 sys.path.append("./")
-from lib.function import tokenize
+from utils import tokenize
 
 
 def pre_tokenize(input_file, output_file):
